@@ -12,7 +12,7 @@ const client = new MongoClient(uri);
 
 let db;
 
-async function connectDB() {
+async function connectDB(){
   await client.connect();
   db = client.db("gamedb");
   console.log("MongoDB connected");
@@ -30,6 +30,4 @@ app.post("/user", async (req,res)=>{
    res.json(result);
 });
 
-app.listen(3000, ()=>{
-   console.log("API running");
-});
+app.listen(process.env.PORT || 3000);
