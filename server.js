@@ -6,131 +6,159 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const PORT = process.env.PORT || 3000;
 const uri = process.env.MONGO_URI;
-const client = new MongoClient(uri);
+const API_KEY = process.env.API_KEY || "myapikey1234";
 
 let db;
 
+// MongoDB connection
 async function connectDB() {
-    await client.connect();
-    db = client.db("gamedb");
-    console.log("MongoDB connected");
+    try {
+        const client = new MongoClient(uri);
+        await client.connect();
+        db = client.db("gamedb");
+        console.log("MongoDB connected");
+    } catch (err) {
+        console.error("MongoDB connection error:", err);
+        process.exit(1);
+    }
 }
 
 connectDB();
 
-// API Key middleware
-const API_KEY = process.env.API_KEY || "myapikey1234"; // Change in production
 
+// API Key middleware
 app.use((req, res, next) => {
-    // The PHP app will send 'api-key' header
-    const key = req.headers['api-key'];
-    if (key !== API_KEY && process.env.NODE_ENV === 'production') {
-        // Optional: enable authentication for production
-        // return res.status(401).json({ error: "Unauthorized" });
+
+    const key = req.headers["api-key"];
+
+    if (process.env.NODE_ENV === "production") {
+        if (!key || key !== API_KEY) {
+            return res.status(401).json({ error: "Unauthorized" });
+        }
     }
+
     next();
 });
 
-// Helper: recursively cast strings to ObjectId and Unix MS to Date if applicable
-function castValues(obj) {
-    if (!obj || typeof obj !== 'object') return obj;
-    if (Array.isArray(obj)) return obj.map(castValues);
+
+// Convert string IDs to ObjectId
+function convertIds(obj) {
+
+    if (!obj || typeof obj !== "object") return obj;
+
+    if (Array.isArray(obj)) return obj.map(convertIds);
+
     const newObj = {};
+
     for (const [k, v] of Object.entries(obj)) {
-        if (typeof v === 'string' && v.length === 24 && /^[0-9a-fA-F]{24}$/.test(v) && k.includes('_id')) {
+
+        if (
+            typeof v === "string" &&
+            v.length === 24 &&
+            /^[0-9a-fA-F]{24}$/.test(v) &&
+            k.includes("_id")
+        ) {
             newObj[k] = new ObjectId(v);
-        } else if (typeof v === 'object' && v !== null && Object.keys(v).length === 1 && v['$date']) {
-            // Support legacy MongoDB BSON date wrapper or specific timestamp format
-            newObj[k] = new Date(v['$date']);
-        } else if (k === 'created_at' || k === 'last_activity') {
-            // Treat specific keys as dates if they are numeric timestamps
-            if (typeof v === 'number') {
-                newObj[k] = new Date(v);
-            } else {
-                newObj[k] = castValues(v);
-            }
         } else {
-            newObj[k] = castValues(v);
+            newObj[k] = convertIds(v);
         }
     }
+
     return newObj;
 }
 
-// User endpoints requested
-app.get("/user/:id", async (req, res) => {
-    const user = await db.collection("users").findOne({ id: req.params.id });
-    res.json(user);
+
+// Health check
+app.get("/", (req, res) => {
+    res.json({ status: "API running" });
 });
 
-app.post("/user", async (req, res) => {
-    const result = await db.collection("users").insertOne(req.body);
-    res.json(result);
-});
 
-// Universal Action Proxy
+// Universal MongoDB Action API
 app.post("/action/:action", async (req, res) => {
-    try {
-        const { action } = req.params;
-        const { collection, filter: rawFilter, document: rawDoc, update: rawUpdate } = req.body;
 
-        if (!collection) return res.status(400).json({ error: "Collection required" });
+    try {
+
+        const action = req.params.action;
+        const { collection, filter, document, update, pipeline } = req.body;
+
+        if (!collection) {
+            return res.status(400).json({ error: "Collection required" });
+        }
 
         const coll = db.collection(collection);
-        const filter = castValues(rawFilter || {});
-        const document = castValues(rawDoc);
-        const update = castValues(rawUpdate);
 
-        let result = {};
+        const f = convertIds(filter || {});
+        const doc = convertIds(document);
+        const upd = convertIds(update);
+
+        let result;
+
         switch (action) {
+
             case "find":
-                // Handles multiple results
-                const docs = await coll.find(filter).toArray();
+                const docs = await coll.find(f).toArray();
                 result = { documents: docs };
                 break;
+
             case "findOne":
-                const doc = await coll.findOne(filter);
-                result = { document: doc };
+                const single = await coll.findOne(f);
+                result = { document: single };
                 break;
+
             case "insertOne":
-                const ins = await coll.insertOne(document);
+                const ins = await coll.insertOne(doc);
                 result = { insertedId: ins.insertedId };
                 break;
+
             case "updateOne":
-                const upd = await coll.updateOne(filter, update);
-                result = { matchedCount: upd.matchedCount, modifiedCount: upd.modifiedCount };
+                const u1 = await coll.updateOne(f, upd);
+                result = {
+                    matchedCount: u1.matchedCount,
+                    modifiedCount: u1.modifiedCount
+                };
                 break;
+
             case "updateMany":
-                const upm = await coll.updateMany(filter, update);
-                result = { matchedCount: upm.matchedCount, modifiedCount: upm.modifiedCount };
+                const um = await coll.updateMany(f, upd);
+                result = {
+                    matchedCount: um.matchedCount,
+                    modifiedCount: um.modifiedCount
+                };
                 break;
+
             case "deleteOne":
-                const del = await coll.deleteOne(filter);
-                result = { deletedCount: del.deletedCount };
+                const d1 = await coll.deleteOne(f);
+                result = { deletedCount: d1.deletedCount };
                 break;
+
             case "deleteMany":
-                const delm = await coll.deleteMany(filter);
-                result = { deletedCount: delm.deletedCount };
+                const dm = await coll.deleteMany(f);
+                result = { deletedCount: dm.deletedCount };
                 break;
+
             case "aggregate":
-                const pipeline = castValues(req.body.pipeline || []);
-                const agg = await coll.aggregate(pipeline).toArray();
-                // Send back as raw array to match what MongoDataApiClient returns when we bypass the wrapper
+                const agg = await coll.aggregate(pipeline || []).toArray();
                 result = agg;
                 break;
+
             default:
                 return res.status(400).json({ error: "Invalid action" });
         }
+
         res.json(result);
+
     } catch (err) {
-        console.error(`Error on /action/${req.params.action}:`, err);
+
+        console.error("API Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
 
-const PORT = process.env.PORT || 3000;
 
+// Start server
 app.listen(PORT, () => {
-    console.log("API running on port " + PORT);
+    console.log("Server running on port " + PORT);
 });
-
